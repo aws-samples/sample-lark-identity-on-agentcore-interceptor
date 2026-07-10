@@ -62,6 +62,8 @@
   var mdReady = window.marked && window.DOMPurify;
   function renderMarkdown(el, raw) {
     if (!mdReady) { el.textContent = raw; return; }
+    // Output is DOMPurify-sanitized before assignment — the sanitizer IS the XSS defense here.
+    // nosemgrep: insecure-innerhtml,insecure-document-method
     el.innerHTML = window.DOMPurify.sanitize(window.marked.parse(raw));
   }
   function addMsg(text, kind) {
