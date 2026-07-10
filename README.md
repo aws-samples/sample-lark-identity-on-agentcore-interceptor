@@ -120,6 +120,32 @@ New users: they message the bot, get a rejection with their `lark:ou_...` id, an
 scripts/test.sh              # agent (8) + router (7) + web_api (4)
 ```
 
+## Cost
+
+This deploys billable AWS resources. All the always-on pieces are consumption- or per-unit-priced (no fixed reservation), so an idle single-user demo in us-west-2 is on the order of a couple USD/month before model usage; the variable cost is dominated by the agent's Bedrock calls. Verify current rates on the AWS pricing pages — figures below are as researched, not a quote.
+
+- **Bedrock model invocations** — the main usage-sensitive line; priced per input/output token on the model in `default_model_id`. A chatty demo is cents-to-dollars; a load test is not.
+- **AgentCore Runtime** — metered per-second, not a reserved instance: CPU (`~$0.0895/vCPU-hour`) is billed only during active processing (free while waiting on the model/tools), memory (`~$0.00945/GB-hour`) accrues continuously while the microVM is alive. An idle deployment still costs memory-time until the session's microVM is torn down.
+- **AgentCore Gateway** — per-invocation (`~$0.005 per 1,000` tool/list calls); negligible at demo volume.
+- **AgentCore Memory (STM)** — billed per event *written* (`~$0.25 per 1,000` create-event calls), **not** for retention duration; the 30-day window itself adds no storage fee.
+- **Lambda + API Gateway (HTTP + WSS)** — router, web_api, interceptor, tools; effectively free at demo volume.
+- **Secrets Manager** — `$0.40/secret/month` each: the Lark-creds and tool-key secrets, plus one per-user token secret created on first authorization (so ~$1.20/month at one user, growing with users).
+- **Cognito, DynamoDB (on-demand)** — the identity plane; negligible at demo volume.
+- **S3 + CloudFront** — SPA hosting; pennies at demo volume.
+
+`scripts/destroy.sh` removes everything, **including the dynamic per-user token secrets**, so you aren't left paying for orphaned resources. Costs are usage-driven — an idle deployment is cheap, but leaving it up still accrues the per-secret charges and the Runtime's memory-time until its microVM shuts down.
+
+## Security considerations
+
+This is a **reference implementation, not production-ready as-is**. Before any real use:
+
+- **IAM is scoped but a sample.** Secret access is path-scoped to `{prefix}/*`; two grants use `resources=["*"]` only because the AWS actions (`ecr:GetAuthorizationToken`, `secretsmanager:CreateSecret`) cannot be resource-scoped — writes are still constrained to `{prefix}/user-tokens/*`. Re-review least-privilege for your account.
+- **CORS is wide open** (`allow_origins=["*"]` on the HTTP API and CloudFront). Lock it to your SPA origin for production.
+- **Per-user Lark tokens live in Secrets Manager**, one secret per user (`{prefix}/user-tokens/{open_id}`), refreshed on expiry. The agent never holds them — the tool Lambda loads them at call time. Treat the account hosting these as sensitive.
+- **The agent's output is untrusted** — the web UI sanitizes it with DOMPurify before rendering, and the marked/DOMPurify CDN scripts are pinned with SRI. Keep it that way if you touch the render path.
+- **Webhook verification is fail-closed** — missing/invalid signature or a timestamp outside the replay window is rejected. Don't relax this.
+- **No secrets in this repo** — Lark credentials come from `.env` → Secrets Manager via `scripts/setup-lark.sh`; `.env` is git-ignored.
+
 ## Deployment status
 
 All four goals verified end-to-end on an AWS account:
