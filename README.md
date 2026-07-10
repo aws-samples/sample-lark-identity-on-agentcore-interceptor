@@ -2,7 +2,7 @@
 
 A reference implementation of enterprise identity on Amazon Bedrock AgentCore, using **Lark (Feishu) as the identity provider**. A simple agent is reachable from **two Lark entrypoints** — chat messages and a desktop-client-embedded web UI — that both resolve to the same `lark:{open_id}` identity. That identity is **forwarded to downstream MCP tools** through an AgentCore Gateway Request Interceptor (the agent never holds a downstream credential), and the tools then **act as the user against Lark** with the user's own token, so they reach only what that user can — Lark itself decides. In short, the agent inherits both *who you are* and *what you're allowed to do*, adding nothing of its own.
 
-This is the **Gateway Interceptor** variant: downstream tools are Lambda targets, and a custom Gateway Request Interceptor forwards identity and injects the per-user credential (self-managed token store). The sibling repo [lark-identity-on-agentcore-native](https://github.com/aleck31/lark-identity-on-agentcore-native) achieves the same guarantees with the **AgentCore Identity Token Vault** (OAuth 3LO, driven agent-side) instead; the two differ only in how the downstream hop resolves per-user credentials.
+This is the **Gateway Interceptor** variant: downstream tools are Lambda targets, and a custom Gateway Request Interceptor forwards identity and injects the per-user credential (self-managed token store). The sibling repo [lark-identity-on-agentcore-native](https://github.com/aws-samples/sample-lark-identity-on-agentcore-native) achieves the same guarantees with the **AgentCore Identity Token Vault** (OAuth 3LO, driven agent-side) instead; the two differ only in how the downstream hop resolves per-user credentials.
 
 ## Architecture
 
