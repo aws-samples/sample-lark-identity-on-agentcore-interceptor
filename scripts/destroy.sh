@@ -6,9 +6,11 @@
 # the control-plane CLI, NOT by CloudFormation — so `cdk destroy` alone can't
 # remove them. This script deletes them first, then destroys the CDK stacks.
 #
-# Order: gateway targets → gateway → runtime → CDK stacks (reverse-dependency).
-# Everything is discovered dynamically by name (no hardcoded ids), so this is
-# safe to re-run — already-gone resources are skipped.
+# Order: gateway targets → gateway → runtime → CDK stacks → CLI-built ECR/CodeBuild
+# → dynamic secrets → service-created log groups. Everything is discovered
+# dynamically by name (no hardcoded ids), so this is safe to re-run — already-gone
+# resources are skipped. Verify the account afterwards rather than trusting this
+# script's own output.
 #
 # Usage: [PROFILE=p REGION=r] scripts/destroy.sh [--yes]
 #   --yes   skip the interactive confirmation
@@ -89,7 +91,27 @@ $CDK destroy \
   "$PREFIX-agentcore" "$PREFIX-observability" "$PREFIX-security" \
   --force
 
-# --- 4. dynamic per-user secrets (NOT managed by any stack) --------------
+# --- 4. AgentCore CLI build resources ------------------------------------
+# `agentcore configure/deploy` names its ECR repo and CodeBuild project after
+# ITSELF (bedrock-agentcore-<runtime_name>*), not $PREFIX — so a prefix scan
+# misses them and they outlive every stack.
+log "Build resources — ECR repository + CodeBuild project (AgentCore CLI naming)"
+CLI_NAME="bedrock-agentcore-${RUNTIME_NAME}"
+for repo in $(aws ecr describe-repositories \
+    --query "repositories[?starts_with(repositoryName,'$CLI_NAME')].repositoryName" \
+    --output text 2>/dev/null || true); do
+  echo "  deleting ECR repository $repo"
+  aws ecr delete-repository --repository-name "$repo" --force >/dev/null 2>&1 \
+    || warn "  ($repo delete failed)"
+done
+for proj in $(aws codebuild list-projects \
+    --query "projects[?starts_with(@,'$CLI_NAME')]" --output text 2>/dev/null || true); do
+  echo "  deleting CodeBuild project $proj"
+  aws codebuild delete-project --name "$proj" >/dev/null 2>&1 \
+    || warn "  ($proj delete failed)"
+done
+
+# --- 5. dynamic per-user secrets (NOT managed by any stack) --------------
 # web_api creates {prefix}/user-tokens/{open_id} at runtime when a user
 # authorizes, so cdk destroy never removes them — clean them up explicitly.
 log "Secrets — remove dynamic per-user token secrets ($PREFIX/user-tokens/*)"
@@ -100,7 +122,27 @@ for name in $(aws secretsmanager list-secrets \
     --force-delete-without-recovery >/dev/null 2>&1 || warn "  ($name delete failed)"
 done
 
-# --- 5. leftover local state --------------------------------------------
+# --- 6. service-created log groups (owned by no stack) -------------------
+# Runtime, CodeBuild builder and Memory log groups are created by the services,
+# so no stack deletes them. This MUST run after `cdk destroy`: CDK's bucket
+# auto-empty custom resource runs during destroy and writes its own log group,
+# so deleting earlier only lets it reappear.
+log "Logs — delete service-created log groups (runtime, builder, memory)"
+NAME_TOKEN="${PREFIX//-/_}"   # how the CLI/toolkit names runtime + memory resources
+for scope in /aws/bedrock-agentcore /aws/vendedlogs/bedrock-agentcore "/aws/codebuild/$CLI_NAME"; do
+  for lg in $(aws logs describe-log-groups --log-group-name-prefix "$scope" \
+      --query "logGroups[].logGroupName" --output text 2>/dev/null || true); do
+    # Only this project's groups — another AgentCore deployment may share the prefix.
+    case "$lg" in
+      *"$NAME_TOKEN"*|"/aws/codebuild/$CLI_NAME"*)
+        echo "  deleting log group $lg"
+        aws logs delete-log-group --log-group-name "$lg" >/dev/null 2>&1 \
+          || warn "  ($lg delete failed)" ;;
+    esac
+  done
+done
+
+# --- 7. leftover local state --------------------------------------------
 log "Local — clear the AgentCore CLI config so a fresh deploy reconfigures"
 [ -f .bedrock_agentcore.yaml ] && { rm -f .bedrock_agentcore.yaml; echo "  removed .bedrock_agentcore.yaml"; }  # safe-rm-ok
 rm -rf .bedrock_agentcore 2>/dev/null || true  # safe-rm-ok
