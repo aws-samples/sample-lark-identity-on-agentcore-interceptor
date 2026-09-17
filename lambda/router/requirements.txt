@@ -1,1 +1,2 @@
-cryptography>=42.0.0
+# Upper bound is deliberate — see the note in agent/requirements.txt. Verified at 50.0.1.
+cryptography>=42.0.0,<51

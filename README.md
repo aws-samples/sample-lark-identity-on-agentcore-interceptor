@@ -2,7 +2,19 @@
 
 A reference implementation of enterprise identity on Amazon Bedrock AgentCore, using **Lark (Feishu) as the identity provider**. A simple agent is reachable from **two Lark entrypoints** — chat messages and a desktop-client-embedded web UI — that both resolve to the same `lark:{open_id}` identity. That identity is **forwarded to downstream MCP tools** through an AgentCore Gateway Request Interceptor (the agent never holds a downstream credential), and the tools then **act as the user against Lark** with the user's own token, so they reach only what that user can — Lark itself decides. In short, the agent inherits both *who you are* and *what you're allowed to do*, adding nothing of its own.
 
-This is the **Gateway Interceptor** variant: downstream tools are Lambda targets, and a custom Gateway Request Interceptor forwards identity and injects the per-user credential (self-managed token store). The sibling repo [lark-identity-on-agentcore-native](https://github.com/aws-samples/sample-lark-identity-on-agentcore-native) achieves the same guarantees with the **AgentCore Identity Token Vault** (OAuth 3LO, driven agent-side) instead; the two differ only in how the downstream hop resolves per-user credentials.
+This is the **Gateway Interceptor** variant: downstream tools are Lambda targets, and a custom Gateway Request Interceptor forwards identity and injects the per-user credential (self-managed token store). The sibling repo [lark-identity-on-agentcore-native](https://github.com/aws-samples/sample-lark-identity-on-agentcore-native) uses the **AgentCore Identity Token Vault** (OAuth 3LO, driven agent-side) instead.
+
+### Which variant to use
+
+Pick by **how your downstream tools are hosted**, not by identity technology:
+
+| Your downstream tools | How the user's credential gets there | Use |
+|---|---|---|
+| An addressable HTTPS API (e.g. Lark REST directly) | the Gateway's own per-user OAuth injection | **neither** — no custom code needed |
+| A long-running MCP server on AgentCore Runtime | the agent fetches the token and passes it in a custom header | [**`-native`**](https://github.com/aws-samples/sample-lark-identity-on-agentcore-native) |
+| **Lambda functions** | the interceptor injects it before the target is invoked | **this repo** |
+
+The middle row is a boundary, not a preference: a Gateway cannot hand a per-user token to an MCP server hosted on AgentCore Runtime, because Runtime's `/invocations` endpoint already uses the `Authorization` header for its own transport auth. The bottom row is what the interceptor is for. A Lambda target takes exactly one credential provider type — `CreateGatewayTarget` rejects both `OAUTH` and `JWT_PASSTHROUGH` with *"Lambda target only supports GATEWAY_IAM_ROLE credential provider type"*, while the identical OAuth configuration is accepted on an `openApiSchema` target — so the Gateway will not fetch or inject a per-user credential for you here, and the end-user identity has to travel in the event payload (this repo puts it in the `tools/call` arguments) rather than in a header.
 
 ## Architecture
 
@@ -117,7 +129,7 @@ New users: they message the bot, get a rejection with their `lark:ou_...` id, an
 ## Test
 
 ```bash
-scripts/test.sh              # agent (8) + router (7) + web_api (4)
+scripts/test.sh              # agent (5) + transport (3) + router (7) + web_api (4)
 ```
 
 ## Cost
