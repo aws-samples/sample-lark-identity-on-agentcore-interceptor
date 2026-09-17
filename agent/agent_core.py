@@ -27,13 +27,14 @@ import os
 import time
 import logging
 import threading
-from datetime import timedelta
+from contextlib import asynccontextmanager
 from typing import Iterator
 
 from strands import Agent
 from strands.models import BedrockModel
 from strands.tools.mcp.mcp_client import MCPClient
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 
 from identity import get_user_jwt
 
@@ -79,6 +80,16 @@ def _make_session_manager(actor_id: str, session_id: str):
     return AgentCoreMemorySessionManager(cfg, region_name=_REGION)
 
 
+@asynccontextmanager
+async def _gateway_transport(url: str, token: str):
+    """MCP transport carrying this user's JWT. mcp 2.x only closes an http client it
+    created itself, so own it here: the session is rebuilt when the token nears expiry
+    and a caller-supplied client would otherwise leak its connection pool each time."""
+    async with create_mcp_http_client(headers={"Authorization": f"Bearer {token}"}) as http_client:
+        async with streamable_http_client(url, http_client=http_client) as streams:
+            yield streams
+
+
 def _build_session(actor_id: str, email: str) -> dict:
     """Build a fresh (agent, mcp) for a session. MCP client is entered once and
     kept open; tools are listed once here, not per message."""
@@ -87,10 +98,7 @@ def _build_session(actor_id: str, email: str) -> dict:
     tools = []
     if _GATEWAY_URL:
         token = get_user_jwt(actor_id, email)
-        mcp = MCPClient(lambda: streamablehttp_client(
-            _GATEWAY_URL, headers={"Authorization": f"Bearer {token}"},
-            timeout=timedelta(seconds=30),
-        ))
+        mcp = MCPClient(lambda: _gateway_transport(_GATEWAY_URL, token))
         mcp.__enter__()  # persistent connection for the session's lifetime
         tools = mcp.list_tools_sync()
     agent = Agent(

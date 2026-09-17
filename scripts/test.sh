@@ -8,6 +8,10 @@ cd "$(cd "$(dirname "$0")/.." && pwd)"
 echo "== agent =="
 uv run --with boto3 --with aiohttp --with pytest python -m pytest agent/test_agent.py -q
 
+# Uses the pinned agent deps, so it also checks that dependency set still resolves.
+echo "== agent transport (real MCP round-trip) =="
+uv run --with-requirements agent/requirements.txt --with pytest python -m pytest agent/test_transport.py -q
+
 echo "== router =="
 uv run --with cryptography --with boto3 --with pytest python -m pytest lambda/router/test_router.py -q
 

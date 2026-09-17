@@ -1,5 +1,8 @@
-aiohttp>=3.10.0
-aws-opentelemetry-distro>=0.10.0
-strands-agents>=1.45.0
-bedrock-agentcore>=0.1.0
-mcp>=1.0.0
+# Bounds are ours on purpose: mcp 2.x slipped in on 2026-09-08 when strands raised ITS
+# cap, silently breaking the 1.x-only transport import here. Raise mcp and strands
+# together, then run scripts/test.sh (agent/test_transport.py covers it) and redeploy.
+aiohttp>=3.10.0,<4
+aws-opentelemetry-distro>=0.10.0,<1
+strands-agents>=1.56.0,<2
+bedrock-agentcore>=1.0.0,<2
+mcp>=2.1,<2.2

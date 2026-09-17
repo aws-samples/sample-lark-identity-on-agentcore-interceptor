@@ -2,10 +2,9 @@
 
 Run: cd agent && uv run --with boto3 --with pytest python -m pytest test_agent.py -v
 
-Note: agent_core imports strands/mcp (installed as ARM64 wheels for the Lambda/
-runtime target), which can't be imported on an x86 test host. We therefore test
-its session-id logic by importing the function in isolation, and cover identity
-(the security-critical part) directly.
+Note: this suite stays dependency-light, so it tests agent_core's session-id logic by
+importing the function in isolation and covers identity (the security-critical part)
+directly. agent_core itself imports fine on x86 — test_transport.py exercises it.
 """
 
 import base64
