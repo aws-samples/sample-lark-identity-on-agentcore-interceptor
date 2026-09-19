@@ -75,28 +75,17 @@ class AgentCoreStack(Stack):
             )
         )
 
-        # Cognito admin auth — mint a per-user JWT (username = lark:{open_id})
-        # to attach as Bearer on outbound MCP/Gateway calls.
-        self.execution_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=[
-                    "cognito-idp:AdminCreateUser",
-                    "cognito-idp:AdminSetUserPassword",
-                    "cognito-idp:AdminInitiateAuth",
-                    "cognito-idp:AdminGetUser",
-                ],
-                resources=[
-                    f"arn:aws:cognito-idp:{region}:{account}:userpool/{cognito_user_pool_id}",
-                ],
-            )
-        )
+        # No cognito-idp admin actions here on purpose. The agent verifies the
+        # caller-supplied access token and forwards it; it must not be able to mint
+        # one, and removing the code is not enough — the grant has to go too.
 
-        # Secrets read — Cognito password salt + Lark creds.
+        # Secrets read — Lark creds only. The Cognito password salt is deliberately
+        # excluded: minting belongs to the router and web_api, not the container.
         self.execution_role.add_to_policy(
             iam.PolicyStatement(
                 actions=["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"],
                 resources=[
-                    f"arn:aws:secretsmanager:{region}:{account}:secret:{prefix}/*",
+                    f"arn:aws:secretsmanager:{region}:{account}:secret:{prefix}/channels/*",
                 ],
             )
         )

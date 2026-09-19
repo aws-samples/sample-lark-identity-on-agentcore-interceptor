@@ -22,7 +22,9 @@
   var elSend = document.getElementById("send");
   var elForm = document.getElementById("composer");
 
-  var state = { idToken: null, actorId: null, displayName: null, ws: null, currentBot: null, botRaw: "" };
+  // accessToken is what the agent verifies and forwards to the Gateway; every
+  // (re)connect refreshes it, since the agent cannot mint one.
+  var state = { idToken: null, accessToken: null, actorId: null, displayName: null, ws: null, currentBot: null, botRaw: "" };
 
   // Login-state cache (sessionStorage). Lark's requestAccess re-prompts every time the page calls it, 
   // so we cache the minted JWT and reuse it across refreshes — only re-authenticating (which re-triggers the Lark consent popup) 
@@ -133,6 +135,7 @@
       .then(function (r) { if (!r.ok) throw new Error("auth failed " + r.status); return r.json(); })
       .then(function (auth) {
         state.idToken = auth.idToken;
+        state.accessToken = auth.accessToken;
         state.actorId = auth.actorId;
         state.displayName = auth.name || auth.actorId;
         saveAuth(auth);   // cache so a refresh reuses it and skips the Lark popup
@@ -151,13 +154,20 @@
   }
 
   // --- step 3: create/refresh a session (WSS URL) ------------------------
+  // Every session call returns a fresh access token; adopt it so the socket always
+  // carries a live one (the agent verifies it and cannot mint a replacement).
+  function adoptSession(session) {
+    if (session && session.accessToken) state.accessToken = session.accessToken;
+    return session;
+  }
+
   function createSession() {
     return fetch(API + "/api/session", {
       method: "POST", headers: { Authorization: "Bearer " + state.idToken },
     }).then(function (r) {
       if (!r.ok) throw new Error("session failed " + r.status);
       return r.json();
-    });
+    }).then(adoptSession);
   }
 
   // Get a fresh WSS URL for reconnect. If the stored JWT has expired (401),
@@ -171,7 +181,7 @@
         return authenticate().then(createSession);   // re-login (may re-prompt)
       }
       if (!r.ok) throw new Error("session refresh failed " + r.status);
-      return r.json();
+      return r.json().then(adoptSession);
     });
   }
 
@@ -216,7 +226,7 @@
 
   function deliver(text) {
     state.currentBot = null;
-    state.ws.send(JSON.stringify({ type: "chat", actorId: state.actorId, message: text }));
+    state.ws.send(JSON.stringify({ type: "chat", accessToken: state.accessToken, message: text }));
   }
 
   function sendMessage(text) {

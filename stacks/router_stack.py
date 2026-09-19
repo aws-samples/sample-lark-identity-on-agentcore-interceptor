@@ -35,6 +35,9 @@ class RouterStack(Stack):
         runtime_arn: str,
         runtime_endpoint_qualifier: str,
         lark_secret_name: str,
+        cognito_user_pool_id: str,
+        cognito_client_id: str,
+        cognito_password_secret_name: str,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -89,6 +92,9 @@ class RouterStack(Stack):
                 "LARK_API_DOMAIN": lark_api_domain,
                 "REGISTRATION_OPEN": registration_open,
                 "SELF_FUNCTION_NAME": fn_name,
+                "COGNITO_USER_POOL_ID": cognito_user_pool_id,
+                "COGNITO_CLIENT_ID": cognito_client_id,
+                "COGNITO_PASSWORD_SECRET_ID": cognito_password_secret_name,
             },
             log_group=log_group,
         )
@@ -138,6 +144,21 @@ class RouterStack(Stack):
             iam.PolicyStatement(
                 actions=["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"],
                 resources=[f"arn:aws:secretsmanager:{region}:{account}:secret:{prefix}/*"],
+            )
+        )
+        # The router is an identity authority: it verified the webhook signature, so it
+        # mints the sender's access token. The agent only verifies and forwards it.
+        self.router_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "cognito-idp:AdminCreateUser",
+                    "cognito-idp:AdminSetUserPassword",
+                    "cognito-idp:AdminInitiateAuth",
+                    "cognito-idp:AdminGetUser",
+                ],
+                resources=[
+                    f"arn:aws:cognito-idp:{region}:{account}:userpool/{cognito_user_pool_id}",
+                ],
             )
         )
 

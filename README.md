@@ -28,7 +28,8 @@ The middle row is a boundary, not a preference: a Gateway cannot hand a per-user
                               │                POST /api/session    JWT  ─▶ presigned WSS URL
                               │                                            │
    InvokeAgentRuntime (SigV4) │                                            │ browser opens WSS
-   payload carries actorId    ▼                                            ▼ (platform bridges to /ws)
+   payload carries the user's ▼                                            ▼ (platform bridges to /ws)
+   signed access token
                              ┌─────────────────────────────────────────────────────┐
                              │  Agent container (ARM64, AgentCore Runtime)         │
                              │    :8080  /ping  /invocations(POST) /ws(WebSocket)  │
@@ -129,7 +130,7 @@ New users: they message the bot, get a rejection with their `lark:ou_...` id, an
 ## Test
 
 ```bash
-scripts/test.sh              # agent (5) + transport (3) + router (7) + web_api (4)
+scripts/test.sh              # agent (2) + identity (12) + transport (3) + router (8) + web_api (6)
 ```
 
 ## Cost
@@ -160,7 +161,10 @@ This is a **reference implementation, not production-ready as-is**. Before any r
 
 ## Deployment status
 
-All four goals verified end-to-end on an AWS account:
+All four goals verified end-to-end on an AWS account. One caveat: the agent's
+identity check (it verifies a caller-supplied access token rather than minting one)
+is covered by unit tests and a CDK synth, but that hop has not been exercised
+against a live deployment.
 
 - ✅ **Lark chat**: a real single-chat message → Router (verify + AES decrypt) → resolve `lark:{open_id}` → AgentCore Runtime → model reply back in Lark.
   `/whoami` in Lark reports the caller's identity.
@@ -169,8 +173,8 @@ All four goals verified end-to-end on an AWS account:
   agent's `/ws` on port 8080 → streaming reply. Shows the user's display name.
   The minted JWT is cached in `sessionStorage`, so a refresh reuses it and skips `requestAccess` — otherwise Lark re-prompts the consent popup on every load (it has no silent login-state reuse; the SPA must do it).
 - ✅ **Unified identity**: both entrypoints resolve to the same `lark:{open_id}` (session/workspace shared).
-- ✅ **MCP identity pass-through**: the agent mints the user's Cognito **access** token → AgentCore Gateway (`customJWTAuthorizer`) → Request Interceptor reads
-  the identity and injects the per-tenant downstream key → the `whoami` tool reports the real end-user id and that a credential was injected, **while the agent never holds the key**.
+- ✅ **MCP identity pass-through**: the caller (router, after verifying the webhook signature; web_api, after verifying the Lark login) mints the user's Cognito **access** token; the agent verifies it against the pool's JWKS and forwards it → AgentCore Gateway (`customJWTAuthorizer`) → Request Interceptor reads
+  the identity and injects the per-tenant downstream key → the `whoami` tool reports the real end-user id and that a credential was injected, **while the agent never holds the key**. The agent has no `cognito-idp` permissions at all, so it cannot assert an identity it was not given.
 - ✅ **Conversation memory**: the agent is a Strands agent with an AgentCore Memory (STM) session manager keyed by `(actor_id, session)`.
   Verified across two *different* runtime sessions for the same user: it recalls a fact stated earlier — so memory persists across reconnects and both entrypoints (30-day event retention).
 - ✅ **Permission inheritance**: after the user authorizes in the web app, the doc tools act *as* that user — each loads the user's Lark `user_access_token` (stored by open_id, refreshed on expiry) and calls the Lark API, so access is **scoped to what that user can see/do in Lark**, adjudicated by Lark, and the agent never holds the token. Verified end-to-end: `list_my_docs` returned the user's real folder and, given a `folder_token`, descended into it to list the nested docs; `create_doc`/`edit_doc`/`delete_doc` created a doc (real document_id), appended content, and trashed it — all as the user.

@@ -116,10 +116,12 @@ def handle_lark_auth(event: dict) -> dict:
         user = lark_oauth.exchange_code(code)
         if not user["open_id"]:
             return _resp(401, {"error": "Lark did not return an open_id"})
-        id_token, actor_id = cognito_mint.mint_id_token(user["open_id"], user["email"])
+        id_token, access_token, actor_id = cognito_mint.mint_tokens(
+            user["open_id"], user["email"])
         # provision app-side identity (allowlist-gated) up front
         identity.resolve_user("lark", user["open_id"], user["name"])
-        return _resp(200, {"idToken": id_token, "actorId": actor_id,
+        return _resp(200, {"idToken": id_token, "accessToken": access_token,
+                           "actorId": actor_id,
                            "openId": user["open_id"], "name": user["name"]})
     except Exception as e:  # noqa: BLE001
         logger.exception("lark auth failed")
@@ -149,8 +151,12 @@ def handle_create_session(event: dict) -> dict:
     session_id = identity.get_or_create_session(user_id)
     status = warmup(session_id, user_id, actor_id)
     ws_url = generate_presigned_ws_url(session_id, PRESIGNED_EXPIRES)
+    # A fresh access token per (re)connect: the agent verifies and forwards it, and
+    # cannot mint one, so the browser is the one that keeps it current.
+    _, access_token, _ = cognito_mint.mint_tokens(open_id, claims.get("email", ""))
     return _resp(200, {"sessionId": session_id, "wsUrl": ws_url,
                        "wsExpires": PRESIGNED_EXPIRES, "status": status,
+                       "accessToken": access_token,
                        "userId": user_id, "isNew": is_new})
 
 
@@ -164,8 +170,10 @@ def handle_get_session(event: dict) -> dict:
         return _resp(403, {"error": "not allowed"})
     session_id = identity.get_or_create_session(user_id)
     ws_url = generate_presigned_ws_url(session_id, PRESIGNED_EXPIRES)
+    _, access_token, _ = cognito_mint.mint_tokens(open_id, claims.get("email", ""))
     return _resp(200, {"sessionId": session_id, "wsUrl": ws_url,
-                       "wsExpires": PRESIGNED_EXPIRES, "userId": user_id})
+                       "wsExpires": PRESIGNED_EXPIRES, "accessToken": access_token,
+                       "userId": user_id})
 
 
 # ----------------------------- router ---------------------------------------

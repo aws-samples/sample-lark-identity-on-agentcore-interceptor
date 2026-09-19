@@ -107,3 +107,32 @@ def test_challenge_regex_rejects_xss():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ------------------------------- identity handoff ----------------------------
+
+def test_invoke_agent_sends_minted_token_not_an_unsigned_identity():
+    """The agent must receive a signed token, never a bare actorId it has to trust."""
+    os.environ.setdefault("COGNITO_USER_POOL_ID", "us-west-2_pool")
+    os.environ.setdefault("COGNITO_CLIENT_ID", "client")
+    os.environ.setdefault("COGNITO_PASSWORD_SECRET_ID", "s/pw")
+    sys.path.insert(0, os.path.dirname(__file__))
+    import index
+
+    captured = {}
+
+    def fake_invoke(**kw):
+        captured.update(json.loads(kw["payload"].decode()))
+        body = mock.Mock()
+        body.read.return_value = json.dumps({"reply": "ok"}).encode()
+        return {"response": body}
+
+    with mock.patch.object(index.cognito, "mint_access_token", return_value="signed.jwt.value"), \
+         mock.patch.object(index.agentcore, "invoke_agent_runtime", side_effect=fake_invoke):
+        reply = index.invoke_agent("sess-1", "user-1", "lark:ou_abc", "hi")
+
+    assert reply == "ok"
+    assert captured["accessToken"] == "signed.jwt.value"
+    # An unsigned identity must not travel in the payload any more.
+    assert "actorId" not in captured
+    assert "userId" not in captured

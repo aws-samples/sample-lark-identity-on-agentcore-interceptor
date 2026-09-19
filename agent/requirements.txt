@@ -6,3 +6,7 @@ aws-opentelemetry-distro>=0.10.0,<1
 strands-agents>=1.56.0,<2
 bedrock-agentcore>=1.0.0,<2
 mcp>=2.1,<2.2
+# Verifies the caller-supplied access token against the pool's JWKS; cryptography is
+# PyJWT's RS256 backend and is required explicitly (PyJWT[crypto] extra).
+PyJWT>=2.8.0,<3
+cryptography>=42.0.0,<51

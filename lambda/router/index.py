@@ -5,7 +5,9 @@ then self-invoke asynchronously and return 200 immediately (avoids webhook
 timeout). Async path: decrypt + parse the event, resolve the user, invoke the
 AgentCore Runtime, and send the reply back to the Lark chat.
 
-Identity: lark:{open_id} — the same identity the web UI resolves to.
+Identity: lark:{open_id} — the same identity the web UI resolves to. The router is an
+identity authority (it verified the webhook signature), so it mints that user's Cognito
+access token and passes it to the Runtime; the agent can only verify and forward it.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import re
 import boto3
 from botocore.config import Config
 
+import cognito
 import lark
 import identity
 
@@ -43,9 +46,14 @@ lambda_client = boto3.client("lambda", region_name=AWS_REGION)
 # ------------------------------- invoke agent -------------------------------
 
 def invoke_agent(session_id: str, user_id: str, actor_id: str, message: str) -> str:
+    """Invoke the Runtime, carrying the user's minted access token in the payload.
+
+    The agent verifies that token's signature and derives the identity from it, so the
+    identity the agent acts on is cryptographically bound to this router's assertion.
+    """
     payload = json.dumps({
-        "action": "chat", "userId": user_id, "actorId": actor_id,
-        "channel": "lark", "message": message,
+        "action": "chat", "message": message,
+        "accessToken": cognito.mint_access_token(actor_id),
     }).encode()
     resp = agentcore.invoke_agent_runtime(
         agentRuntimeArn=RUNTIME_ARN, qualifier=QUALIFIER,

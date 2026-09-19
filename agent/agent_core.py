@@ -12,10 +12,10 @@ Memory immediately (STM), so history survives idle-termination + a new microVM,
 and is keyed by (actor_id, session_id) — one long thread per user, shared across
 reconnects and both Lark entrypoints.
 
-Identity pass-through: the user's Cognito access token is the Bearer on the MCP
-connection, so the Gateway authorizer + interceptor see the real end-user; the
-agent never holds a downstream tool credential. The token expires (~1h), so the
-cached session is rebuilt after a TTL.
+Identity pass-through: the caller supplies the user's Cognito access token, already
+verified by `identity.verify_access_token`, and it is used verbatim as the Bearer on
+the MCP connection. The agent mints nothing, so it cannot assert an identity it was
+not given; the Gateway authorizer + interceptor see the real end-user.
 
 `run_chat` returns the final text; `stream_chat` yields text deltas.
 """
@@ -36,7 +36,7 @@ from strands.tools.mcp.mcp_client import MCPClient
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared._httpx_utils import create_mcp_http_client
 
-from identity import get_user_jwt
+from identity import jwt_exp
 
 log = logging.getLogger("agent.core")
 
@@ -49,12 +49,14 @@ _SYSTEM = os.environ.get(
     "You are a helpful assistant embedded in Lark. Be concise. "
     "Use the provided tools when they help answer the user.",
 )
-# Rebuild a cached session before its Cognito access token (~1h) expires.
-_SESSION_TTL = int(os.environ.get("SESSION_TTL_SECONDS", "3000"))  # 50 min
+# Rebuild a cached session this many seconds before its forwarded token expires.
+_EXPIRY_MARGIN = int(os.environ.get("SESSION_EXPIRY_MARGIN", "60"))
+# Text that marks a Gateway rejection of the forwarded token.
+_AUTH_FAILURE_MARKERS = ("401", "403", "unauthorized", "insufficient_scope", "invalid_token")
 
 _model = BedrockModel(model_id=_MODEL_ID, streaming=True)
 
-# session_id -> {agent, mcp, created}. One microVM ≈ one session, so this is tiny.
+# session_id -> {agent, mcp, token, expires_at}. One microVM ≈ one session.
 _sessions: dict[str, dict] = {}
 _lock = threading.Lock()
 
@@ -90,14 +92,13 @@ async def _gateway_transport(url: str, token: str):
             yield streams
 
 
-def _build_session(actor_id: str, email: str) -> dict:
+def _build_session(actor_id: str, token: str) -> dict:
     """Build a fresh (agent, mcp) for a session. MCP client is entered once and
     kept open; tools are listed once here, not per message."""
     session_id = _session_id_for(actor_id)
     mcp = None
     tools = []
     if _GATEWAY_URL:
-        token = get_user_jwt(actor_id, email)
         mcp = MCPClient(lambda: _gateway_transport(_GATEWAY_URL, token))
         mcp.__enter__()  # persistent connection for the session's lifetime
         tools = mcp.list_tools_sync()
@@ -105,38 +106,93 @@ def _build_session(actor_id: str, email: str) -> dict:
         model=_model, system_prompt=_SYSTEM, tools=tools,
         session_manager=_make_session_manager(actor_id, session_id),
     )
-    return {"agent": agent, "mcp": mcp, "created": time.time()}
+    return {"agent": agent, "mcp": mcp, "token": token,
+            "expires_at": jwt_exp(token) - _EXPIRY_MARGIN}
 
 
-def _get_session(actor_id: str, email: str) -> dict:
-    """Return the cached session for this user, rebuilding it if absent or if its
-    access token is near expiry."""
+def _close(session: dict) -> None:
+    if session.get("mcp"):
+        try:
+            session["mcp"].__exit__(None, None, None)
+        except Exception:
+            pass
+
+
+def _get_session(actor_id: str, token: str) -> dict:
+    """Return the cached session for this user, rebuilding it if absent, if its
+    forwarded token is near expiry, or if the caller supplied a fresher token."""
     session_id = _session_id_for(actor_id)
     with _lock:
         s = _sessions.get(session_id)
-        if s and (time.time() - s["created"]) < _SESSION_TTL:
+        fresh = s and time.time() < s["expires_at"] and s["token"] == token
+        if fresh:
             return s
-        if s and s.get("mcp"):
-            try:
-                s["mcp"].__exit__(None, None, None)  # close the stale connection
-            except Exception:
-                pass
-        s = _build_session(actor_id, email)
+        if s:
+            _close(s)  # stale token pinned in the MCP client — drop the connection
+        s = _build_session(actor_id, token)
         _sessions[session_id] = s
         return s
 
 
-def run_chat(actor_id: str, message: str, email: str = "") -> str:
-    """Non-streaming chat → assistant's final text. History via Memory."""
-    agent = _get_session(actor_id, email)["agent"]
-    return str(agent(message))
+def _invalidate(actor_id: str) -> None:
+    """Drop the cached session so the next call rebuilds with the current token."""
+    session_id = _session_id_for(actor_id)
+    with _lock:
+        s = _sessions.pop(session_id, None)
+    if s:
+        _close(s)
 
 
-def stream_chat(actor_id: str, message: str, email: str = "") -> Iterator[str]:
-    """Streaming chat for the WebSocket path. Yields text deltas."""
+def _is_auth_failure(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(m in text for m in _AUTH_FAILURE_MARKERS)
+
+
+def run_chat(actor_id: str, message: str, token: str) -> str:
+    """Non-streaming chat → assistant's final text. History via Memory.
+
+    Retries once on a Gateway auth failure: the cached MCP client pins the token it
+    was built with, so a rebuild with the current one is the recovery path.
+    """
+    try:
+        return str(_get_session(actor_id, token)["agent"](message))
+    except Exception as e:
+        if not _is_auth_failure(e):
+            raise
+        log.warning("gateway rejected the forwarded token; rebuilding session once")
+        _invalidate(actor_id)
+        return str(_get_session(actor_id, token)["agent"](message))
+
+
+def stream_chat(actor_id: str, message: str, token: str) -> Iterator[str]:
+    """Streaming chat for the WebSocket path. Yields text deltas.
+
+    Only retries before the first delta reaches the client, so a recovery can never
+    duplicate output that was already rendered.
+    """
+    try:
+        yield from _stream_once(actor_id, message, token)
+    except _AuthFailedBeforeOutput:
+        log.warning("gateway rejected the forwarded token; rebuilding session once")
+        _invalidate(actor_id)
+        yield from _stream_once(actor_id, message, token)
+
+
+class _AuthFailedBeforeOutput(Exception):
+    """Gateway auth failed with nothing emitted yet, so a retry is safe."""
+
+
+def _stream_once(actor_id: str, message: str, token: str) -> Iterator[str]:
     import asyncio
 
-    agent = _get_session(actor_id, email)["agent"]
+    emitted = False
+    try:
+        agent = _get_session(actor_id, token)["agent"]
+    except Exception as e:
+        if _is_auth_failure(e):
+            raise _AuthFailedBeforeOutput(str(e)) from e
+        raise
+
     loop = asyncio.new_event_loop()
     try:
         agen = agent.stream_async(message)
@@ -145,8 +201,13 @@ def stream_chat(actor_id: str, message: str, email: str = "") -> Iterator[str]:
                 event = loop.run_until_complete(agen.__anext__())
             except StopAsyncIteration:
                 break
+            except Exception as e:
+                if not emitted and _is_auth_failure(e):
+                    raise _AuthFailedBeforeOutput(str(e)) from e
+                raise
             # Strands emits {"data": "<text chunk>"} for streamed model text.
             if isinstance(event, dict) and "data" in event:
+                emitted = True
                 yield event["data"]
     finally:
         loop.close()

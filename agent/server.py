@@ -3,20 +3,20 @@
 HTTP 8080 — the AgentCore Runtime contract:
   GET  /ping          -> {"status":"Healthy"}   (must respond within seconds)
   POST /invocations   -> action in {warmup, status, chat}
-      chat   : {action,actorId,message,email?} -> {reply}  (history via Memory)
+      chat   : {action,accessToken,message} -> {reply}  (history via Memory)
       warmup : {action} -> {ready:true}
       status : {action} -> {ready, uptime}
 
 WebSocket 18789 — the desktop (Lark-embedded web UI) path. The AgentCore platform
 bridges a browser's presigned WSS connection to this port. Protocol (JSON frames):
-  client -> {"type":"chat","actorId":"lark:ou_x","message":"...","email?":""}
+  client -> {"type":"chat","accessToken":"<jwt>","message":"..."}
   server -> {"type":"delta","text":"..."} *  then  {"type":"final"}
   errors -> {"type":"error","message":"..."}
 
-Identity note: the browser does not carry actorId on the WS frame in production;
-it is established during the HTTP /invocations warmup (which the web_api Lambda
-calls before handing out the WSS URL). For the PoC the client sends actorId on
-the frame so the path is testable end-to-end.
+Identity: every chat carries the caller's Cognito **access** token, which this
+server verifies against the pool's JWKS before use — the Runtime's inbound auth is
+SigV4, so nothing upstream has checked it. `actorId` is the verified `username`
+claim; an unsigned identity is never accepted, and the agent cannot mint one.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ import time
 from aiohttp import web, WSMsgType
 
 import agent_core
+from identity import IdentityError, verify_access_token
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("agent.server")
@@ -60,14 +61,18 @@ async def handle_invocations(request: web.Request) -> web.Response:
         return web.json_response({"ready": True})
 
     if action == "chat":
-        actor_id = payload.get("actorId") or payload.get("userId") or "anonymous"
         message = payload.get("message", "")
-        email = payload.get("email", "")
         if not message:
             return web.json_response({"error": "message required"}, status=400)
         try:
+            token = payload.get("accessToken", "")
+            actor_id, _ = verify_access_token(token)
+        except IdentityError as e:
+            log.warning("rejected chat: %s", e)
+            return web.json_response({"error": f"unauthenticated: {e}"})
+        try:
             reply = await asyncio.get_event_loop().run_in_executor(
-                None, agent_core.run_chat, actor_id, message, email
+                None, agent_core.run_chat, actor_id, message, token
             )
             return web.json_response({"reply": reply})
         except Exception as e:
@@ -100,11 +105,16 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
             await ws.send_json({"type": "error", "message": "unsupported frame type"})
             continue
 
-        actor_id = frame.get("actorId") or "anonymous"
         message = frame.get("message", "")
-        email = frame.get("email", "")
         if not message:
             await ws.send_json({"type": "error", "message": "message required"})
+            continue
+        try:
+            token = frame.get("accessToken", "")
+            actor_id, _ = verify_access_token(token)
+        except IdentityError as e:
+            log.warning("rejected ws chat: %s", e)
+            await ws.send_json({"type": "error", "message": f"unauthenticated: {e}"})
             continue
 
         loop = asyncio.get_event_loop()
@@ -115,7 +125,7 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
 
             def produce():
                 try:
-                    for delta in agent_core.stream_chat(actor_id, message, email):
+                    for delta in agent_core.stream_chat(actor_id, message, token):
                         loop.call_soon_threadsafe(queue.put_nowait, ("delta", delta))
                 except Exception as e:  # noqa: BLE001
                     loop.call_soon_threadsafe(queue.put_nowait, ("error", str(e)))

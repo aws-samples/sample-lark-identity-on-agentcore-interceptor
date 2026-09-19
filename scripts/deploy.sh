@@ -74,7 +74,6 @@ phase2_runtime() {
     --env "BEDROCK_MODEL_ID=$model" \
     --env "COGNITO_USER_POOL_ID=$pool" \
     --env "COGNITO_CLIENT_ID=$client" \
-    --env "COGNITO_PASSWORD_SECRET_ID=$PREFIX/cognito-password-secret" \
     --env "GATEWAY_URL=$gw"
 
   # Persist the runtime id back into cdk.json for the dependent stacks.

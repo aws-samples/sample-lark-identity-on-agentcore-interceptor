@@ -3,6 +3,7 @@
 Run: uv run --with boto3 python -m pytest lambda/web_api/test_web_api.py -v
 """
 
+import json
 import os
 import sys
 from unittest import mock
@@ -63,3 +64,39 @@ def test_create_session_rejects_unallowed_user():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ------------------------------- token handoff -------------------------------
+
+def test_mint_tokens_returns_the_access_token_too():
+    """The Gateway matches `client_id`, which only the access token carries."""
+    import cognito_mint
+
+    with mock.patch.object(cognito_mint, "_ensure_user"), \
+         mock.patch.object(cognito_mint, "_password", return_value="pw"), \
+         mock.patch.object(cognito_mint, "_cognito") as c:
+        c.admin_initiate_auth.return_value = {
+            "AuthenticationResult": {"IdToken": "id.tok", "AccessToken": "access.tok"}
+        }
+        id_token, access_token, actor_id = cognito_mint.mint_tokens("ou_abc")
+
+    assert (id_token, access_token) == ("id.tok", "access.tok")
+    assert actor_id == "lark:ou_abc"
+
+
+def test_session_response_carries_a_fresh_access_token():
+    """Each (re)connect hands the browser a live token; the agent cannot mint one."""
+    import index
+
+    with mock.patch.object(index.identity, "resolve_user", return_value=("u-1", False)), \
+         mock.patch.object(index.identity, "get_or_create_session", return_value="ses_1"), \
+         mock.patch.object(index, "warmup", return_value="ready"), \
+         mock.patch.object(index, "generate_presigned_ws_url", return_value="wss://x/ws"), \
+         mock.patch.object(index.cognito_mint, "mint_tokens",
+                           return_value=("id.tok", "access.tok", "lark:ou_abc")):
+        resp = index.handle_create_session(
+            {"requestContext": {"authorizer": {"jwt": {"claims": {
+                "cognito:username": "lark:ou_abc"}}}}})
+
+    assert resp["statusCode"] == 200
+    assert json.loads(resp["body"])["accessToken"] == "access.tok"

@@ -1,68 +1,19 @@
 """Unit tests for agent logic that doesn't require live AWS or the (ARM64) deps.
 
-Run: cd agent && uv run --with boto3 --with pytest python -m pytest test_agent.py -v
+Run: cd agent && uv run --with pytest python -m pytest test_agent.py -v
 
-Note: this suite stays dependency-light, so it tests agent_core's session-id logic by
-importing the function in isolation and covers identity (the security-critical part)
-directly. agent_core itself imports fine on x86 — test_transport.py exercises it.
+Identity is the security-critical part and now needs real RSA signing, so it lives in
+test_identity.py; the MCP transport lives in test_transport.py. This suite stays
+dependency-light and only covers logic with no external requirements.
 """
 
-import base64
 import hashlib
-import json
 import os
 import sys
-from unittest import mock
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
-
-
-# ------------------------------- identity -----------------------------------
-
-def test_derive_password_deterministic_and_complex():
-    import identity
-    with mock.patch.object(identity, "_get_salt", return_value="test-salt"):
-        p1 = identity._derive_password("lark:ou_abc")
-        p2 = identity._derive_password("lark:ou_abc")
-        p3 = identity._derive_password("lark:ou_xyz")
-    assert p1 == p2                       # deterministic
-    assert p1 != p3                       # per-user
-    assert p1.endswith("Aa1!")            # complexity suffix
-    assert len(p1) == 36
-
-
-def test_jwt_exp_parses_unverified():
-    import identity
-    payload = base64.urlsafe_b64encode(json.dumps({"exp": 1234567890}).encode()).decode().rstrip("=")
-    token = f"header.{payload}.sig"
-    assert identity._jwt_exp(token) == 1234567890.0
-
-
-def test_jwt_exp_bad_token_returns_zero():
-    import identity
-    assert identity._jwt_exp("not-a-jwt") == 0.0
-
-
-def test_ensure_user_email_sanitizes_colon():
-    """open_id-based username 'lark:ou_x' must not produce an invalid email."""
-    import identity
-    captured = {}
-
-    def fake_create(**kw):
-        captured["email"] = next(a["Value"] for a in kw["UserAttributes"] if a["Name"] == "email")
-
-    with mock.patch.object(identity, "_cognito") as c:
-        from botocore.exceptions import ClientError
-        c.admin_get_user.side_effect = ClientError(
-            {"Error": {"Code": "UserNotFoundException"}}, "AdminGetUser")
-        c.admin_create_user.side_effect = fake_create
-        c.admin_set_user_password.return_value = {}
-        with mock.patch.object(identity, "_get_salt", return_value="s"):
-            identity._ensure_user("lark:ou_abc", "")
-    assert ":" not in captured["email"]           # colon replaced
-    assert captured["email"] == "lark-ou_abc@lark.local"
 
 
 # ------------------------------- agent_core session id ----------------------
@@ -79,6 +30,21 @@ def test_session_id_deterministic_per_user():
     assert sid("lark:ou_abc") == sid("lark:ou_abc")          # stable
     assert sid("lark:ou_abc") != sid("lark:ou_xyz")          # per-user
     assert sid("lark:ou_abc").startswith("sess-")
+
+
+def test_agent_never_mints_a_token():
+    """Regression guard: the container must not be able to assert an identity.
+
+    The impersonation hole this repo closed was an unsigned actorId feeding a Cognito
+    admin auth call inside the container; these APIs must never come back here.
+    """
+    agent_dir = os.path.dirname(__file__)
+    forbidden = ("admin_initiate_auth", "admin_create_user", "admin_set_user_password",
+                 "AdminInitiateAuth", "_derive_password")
+    for name in ("identity.py", "agent_core.py", "server.py"):
+        src = open(os.path.join(agent_dir, name), encoding="utf-8").read()
+        for token in forbidden:
+            assert token not in src, f"{name} must not mint credentials ({token})"
 
 
 if __name__ == "__main__":

@@ -59,6 +59,9 @@ router = RouterStack(
     runtime_arn=agentcore.runtime_arn,
     runtime_endpoint_qualifier=ctx("runtime_endpoint_id") or "DEFAULT",
     lark_secret_name=security.lark_secret.secret_name,
+    cognito_user_pool_id=security.user_pool_id,
+    cognito_client_id=security.user_pool_client_id,
+    cognito_password_secret_name=security.cognito_password_secret.secret_name,
     env=env,
 )
 

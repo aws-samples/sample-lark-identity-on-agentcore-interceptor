@@ -59,8 +59,13 @@ def _ensure_user(username: str, email: str) -> None:
     )
 
 
-def mint_id_token(open_id: str, email: str = "") -> tuple[str, str]:
-    """Return (id_token, actor_id) for a Lark open_id. actor_id == username."""
+def mint_tokens(open_id: str, email: str = "") -> tuple[str, str, str]:
+    """Return (id_token, access_token, actor_id) for a Lark open_id.
+
+    The ID token authenticates the browser to this API's Cognito authorizer; the access
+    token is what the agent verifies and forwards to the Gateway (`allowedClients`
+    matches the `client_id` claim, which ID tokens do not carry).
+    """
     username = f"lark:{open_id}"
     _ensure_user(username, email)
     resp = _cognito.admin_initiate_auth(
@@ -68,4 +73,5 @@ def mint_id_token(open_id: str, email: str = "") -> tuple[str, str]:
         AuthFlow="ADMIN_USER_PASSWORD_AUTH",
         AuthParameters={"USERNAME": username, "PASSWORD": _password(username)},
     )
-    return resp["AuthenticationResult"]["IdToken"], username
+    result = resp["AuthenticationResult"]
+    return result["IdToken"], result["AccessToken"], username
